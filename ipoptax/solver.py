@@ -8,6 +8,8 @@ from functools import partial
 
 import numpy as onp
 
+from .linalg_helpers import solve_ldlt
+
 
 @jax.jit
 def solve(
@@ -35,6 +37,10 @@ def solve(
     # TODO(joao):
     # 1. Select merit function parameter rho.
     # 2. Implement line search.
+    # 3. Regularize z? Does IPOPT do this?
+    # 3. Regularize z.
+    #    1. Add method for checking positive definiteness.
+    #    2. Increase delta until \nabla_xx L + delta I is positive definite.
 
     assert ws_s.min() > 0.0, "ws_s must contain only positive entries."
     assert ws_z.min() > 0.0, "ws_z must contain only positive entries."
@@ -48,17 +54,23 @@ def solve(
         assert s_dim == z_dim, "Incompatible shapes of s and z."
 
         x = xsyz[:x_dim]
-        s = xsyz[x_dim:x_dim + s_dim]
-        y = xsyz[x_dim + s_dim:-z_dim]
+        s = xsyz[x_dim : x_dim + s_dim]
+        y = xsyz[x_dim + s_dim : -z_dim]
         z = xsyz[-z_dim:]
         return x, s, y, z
 
     def combine_vars(x, s, y, z):
         return np.concatenate([x, s, y, z])
 
-    def augmented_lagrangian(xsyz, mu):
+    def barrier_augmented_lagrangian(xsyz, mu):
         x, s, y, z = split_vars(xsyz)
-        return f(x) - np.dot(y, c(x)) - np.dot(z, c(x) + s) - gamma * np.dot(y, y) - mu * np.log(s).sum()
+        return (
+            f(x)
+            - np.dot(y, c(x))
+            - np.dot(z, c(x) + s)
+            - gamma * np.dot(y, y)
+            - mu * np.log(s).sum()
+        )
 
     def adaptive_mu(x, s, y, z):
         # Uses the LOQO rule mentioned in Nocedal & Wright.
@@ -78,12 +90,11 @@ def solve(
         mu = adaptive_mu(x, s, y, z)
 
         xsyz = combine_vars(x, s, y, z)
-        al = partial(augmented_lagrangian, mu=mu)
+        al = partial(barrier_augmented_lagrangian, mu=mu)
         lhs = jax.hessian(al)(xsyz)
         rhs = -jax.grad(al)(xsyz)
 
-        f = jax.scipy.linalg.cho_factor(lhs)
-        dxsyz = jax.scipy.linalg.cho_solve(f, rhs)
+        dxsyz = solve_ldlt(lhs, rhs)
 
         dx, ds, dy, dz = split_vars(dxsyz)
 
@@ -97,7 +108,9 @@ def solve(
         x = x + dx
 
         converged = rhs.abs().max() < max_kkt_violation
-        should_continue = np.logical_and(np.logical_not(converged), iteration < max_iterations)
+        should_continue = np.logical_and(
+            np.logical_not(converged), iteration < max_iterations
+        )
 
         return {
             "x": new_x,
