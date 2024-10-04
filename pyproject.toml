@@ -1,0 +1,29 @@
+[project]
+name = "ipoptax"
+version = "0.1"
+requires-python = ">= 3.12"
+dependencies = [
+  "absl-py",
+  "black",
+  "jax[cpu]; platform_system != \"Linux\"",
+  "jax[cuda12]; platform_system == \"Linux\"",
+  "numpy",
+]
+authors = [
+  {name = "Joao Sousa-Pinto", email = "joaospinto@gmail.com"},
+]
+description = "Mini IPOPT written in JAX"
+license = "MIT"
+
+[tool.black]
+line-length = 80
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["ipoptax"]
