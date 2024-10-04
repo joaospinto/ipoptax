@@ -1,14 +1,10 @@
-# TODO(joao)
-
 from jax import numpy as np
 
 import jax
 
 from functools import partial
 
-import numpy as onp
-
-from .linalg_helpers import solve_ldlt
+from .linalg_helpers import solve_ldlt, is_positive_definite
 
 
 @jax.jit
@@ -24,23 +20,21 @@ def solve(
     max_iterations=100,
     max_kkt_violation=1e-6,
     tau=0.995,
+    min_delta=1e-9,
+    delta_update_factor=10,
     gamma=1e-6,
+    armijo_factor=1e-4,
+    line_search_factor=0.5,
 ):
     """
     Solves an optimization problem of the form:
         min_x f(x) s.t. (c(x) = 0 and g(x) + s = 0 and s >= 0)
 
+    min_delta determines the minimum regularization on the objective Hessian.
     gamma regularizes the constraints to ensure the Newton-KKT system is non-singular.
     tau is a parameter used in the fraction-to-the-boundary rule.
+    line_search_factor determines how much to backtrack at each line search iteration.
     """
-
-    # TODO(joao):
-    # 1. Select merit function parameter rho.
-    # 2. Implement line search.
-    # 3. Regularize z? Does IPOPT do this?
-    # 3. Regularize z.
-    #    1. Add method for checking positive definiteness.
-    #    2. Increase delta until \nabla_xx L + delta I is positive definite.
 
     assert ws_s.min() > 0.0, "ws_s must contain only positive entries."
     assert ws_z.min() > 0.0, "ws_z must contain only positive entries."
@@ -48,7 +42,6 @@ def solve(
     def split_vars(xsyz):
         x_dim = ws_x.shape[0]
         s_dim = ws_s.shape[0]
-        y_dim = ws_y.shape[0]
         z_dim = ws_z.shape[0]
 
         assert s_dim == z_dim, "Incompatible shapes of s and z."
@@ -72,13 +65,35 @@ def solve(
             - mu * np.log(s).sum()
         )
 
-    def adaptive_mu(x, s, y, z):
+    def adaptive_mu(s, z):
         # Uses the LOQO rule mentioned in Nocedal & Wright.
         m = s.shape[0]
         dot = np.dot(s, z)
         zeta = (s * z).min() * m / dot
         sigma = 0.1 * np.min(0.5 * (1.0 - zeta) / zeta, 2) ** 3
         return sigma * dot / m
+
+    def get_delta(M):
+        dim = M.shape[0]
+        def body(delta):
+            return delta_update_factor * delta
+        def should_continue(delta):
+            return np.logical_not(is_positive_definite(M + delta * np.eye(dim)))
+        return jax.lax.while_loop(body, should_continue, min_delta)
+
+    def get_rho(x, s, dx):
+        # D(merit_function; dx) = D(f; dx) - rho * || (c(x), g(x) + s) ||
+        # rho > (D(f; dx) + k) / || (c(x), g(x) + s) || iff D(merit_function; dx) < -k.
+        f_slope = jax.grad(f)(x).dot(dx)
+        d = np.linalg.norm(np.concatenate([c(x), g(x) + s]))
+        k = np.maximum(d, 2.0 * np.abs(f_slope))
+        return np.minimum((f_slope + k) / d, 1e9)
+
+    def merit_function(x, s, rho):
+        return f(x) + rho * np.linalg.norm(np.concatenate([c(x), g(x) + s]))
+
+    def merit_function_slope(x, s, dx, rho):
+        return np.grad(f)(x).dot(dx) - rho * np.linalg.norm(np.concatenate([c(x), g(x) + s]))
 
     def optimization_loop(inputs):
         x = inputs["x"]
@@ -87,25 +102,48 @@ def solve(
         z = inputs["z"]
         iteration = inputs["iteration"]
 
-        mu = adaptive_mu(x, s, y, z)
+        mu = adaptive_mu(s, z)
 
         xsyz = combine_vars(x, s, y, z)
         al = partial(barrier_augmented_lagrangian, mu=mu)
         lhs = jax.hessian(al)(xsyz)
         rhs = -jax.grad(al)(xsyz)
 
+        x_dim = x.shape[0]
+        remaining_dim = lhs.shape[0] - x_dim
+
+        delta = get_delta(lhs[:x_dim, :x_dim])
+        lhs = lhs + jax.scipy.linalg.block_diag(
+            delta * np.eye(x_dim),
+            np.zeros([remaining_dim, remaining_dim])
+        )
+
         dxsyz = solve_ldlt(lhs, rhs)
 
         dx, ds, dy, dz = split_vars(dxsyz)
 
         # s + alpha_s_max * ds >= (1 - tau) * s
-        alpha_s_max = np.min((-tau * s[ds < 0.0] / ds[ds < 0.0]).min(), 1.0)
+        alpha_s_max = np.minimum((-tau * s[ds < 0.0] / ds[ds < 0.0]).min(), 1.0)
 
         # z + alpha_z_max * dz >= (1 - tau) * z
-        alpha_z_max = np.min((-tau * z[dz < 0.0] / dz[dz < 0.0]).min(), 1.0)
+        alpha_z_max = np.minimum((-tau * z[dz < 0.0] / dz[dz < 0.0]).min(), 1.0)
 
-        # TODO(joao): add line search, etc. what's the easiest way of picking the merit rho?
-        x = x + dx
+        rho = get_rho(x=x, s=s, dx=dx)
+        m = partial(merit_function, s=s, rho=rho)
+        m_slope = merit_function_slope(x=x, s=s, dx=dx, rho=rho)
+
+        def ls_body(alpha):
+            return alpha * line_search_factor
+
+        def ls_continue(alpha):
+            return m(x + alpha * dx) - m(x) <= armijo_factor * m_slope * alpha
+
+        alpha = jax.lax.while_loop(ls_body, ls_continue, 1.0)
+
+        new_x = x + alpha * dx
+        new_s = s + np.minimum(alpha_s_max, alpha) * ds
+        new_y = y + alpha * dy
+        new_z = z + np.minimum(alpha_z_max, alpha) * dz
 
         converged = rhs.abs().max() < max_kkt_violation
         should_continue = np.logical_and(
@@ -119,6 +157,7 @@ def solve(
             "z": new_z,
             "iteration": iteration + 1,
             "should_continue": should_continue,
+            "converged": converged,
         }
 
     def continuation_criteria(inputs):
@@ -131,6 +170,7 @@ def solve(
         "z": ws_z,
         "iteration": 0,
         "should_continue": True,
+        "converged": False,
     }
 
     outputs = jax.lax.while_loop(
@@ -145,4 +185,5 @@ def solve(
         "y": outputs["y"],
         "z": outputs["z"],
         "iteration": outputs["iteration"],
+        "converged": outputs["converged"],
     }
