@@ -4,7 +4,7 @@ import jax
 
 from functools import partial
 
-from .linalg_helpers import solve_ldlt, is_positive_definite
+from .linalg_helpers import is_positive_definite
 
 
 @jax.jit
@@ -70,7 +70,7 @@ def solve(
         m = s.shape[0]
         dot = np.dot(s, z)
         zeta = (s * z).min() * m / dot
-        sigma = 0.1 * np.min(0.5 * (1.0 - zeta) / zeta, 2) ** 3
+        sigma = 0.1 * np.minimum(0.5 * (1.0 - zeta) / zeta, 2) ** 3
         return sigma * dot / m
 
     def get_delta(M):
@@ -93,7 +93,7 @@ def solve(
         return f(x) + rho * np.linalg.norm(np.concatenate([c(x), g(x) + s]))
 
     def merit_function_slope(x, s, dx, rho):
-        return np.grad(f)(x).dot(dx) - rho * np.linalg.norm(np.concatenate([c(x), g(x) + s]))
+        return jax.grad(f)(x).dot(dx) - rho * np.linalg.norm(np.concatenate([c(x), g(x) + s]))
 
     def optimization_loop(inputs):
         x = inputs["x"]
@@ -118,7 +118,7 @@ def solve(
             np.zeros([remaining_dim, remaining_dim])
         )
 
-        dxsyz = solve_ldlt(lhs, rhs)
+        dxsyz = np.linalg.solve(lhs, rhs)
 
         dx, ds, dy, dz = split_vars(dxsyz)
 
@@ -145,7 +145,7 @@ def solve(
         new_y = y + alpha * dy
         new_z = z + np.minimum(alpha_z_max, alpha) * dz
 
-        converged = rhs.abs().max() < max_kkt_violation
+        converged = np.abs(rhs).max() < max_kkt_violation
         should_continue = np.logical_and(
             np.logical_not(converged), iteration < max_iterations
         )
