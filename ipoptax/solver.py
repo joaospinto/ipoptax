@@ -60,7 +60,7 @@ def solve(
         return (
             f(x)
             - np.dot(y, c(x))
-            - np.dot(z, c(x) + s)
+            - np.dot(z, g(x) + s)
             - gamma * np.dot(y, y)
             - mu * np.log(s).sum()
         )
