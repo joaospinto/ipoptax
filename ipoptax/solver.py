@@ -123,10 +123,12 @@ def solve(
         dx, ds, dy, dz = split_vars(dxsyz)
 
         # s + alpha_s_max * ds >= (1 - tau) * s
-        alpha_s_max = np.minimum((-tau * s[ds < 0.0] / ds[ds < 0.0]).min(), 1.0)
+        mod_ds = np.minimum(ds, np.full_like(ds, -1e-12))
+        alpha_s_max = np.minimum((-tau * s / mod_ds).min(), 1.0)
 
         # z + alpha_z_max * dz >= (1 - tau) * z
-        alpha_z_max = np.minimum((-tau * z[dz < 0.0] / dz[dz < 0.0]).min(), 1.0)
+        mod_dz = np.minimum(dz, np.full_like(dz, -1e-12))
+        alpha_z_max = np.minimum((-tau * z / mod_dz).min(), 1.0)
 
         rho = get_rho(x=x, s=s, dx=dx)
         m = partial(merit_function, s=s, rho=rho)
@@ -138,7 +140,9 @@ def solve(
         def ls_continue(alpha):
             return m(x + alpha * dx) - m(x) <= armijo_factor * m_slope * alpha
 
-        alpha = jax.lax.while_loop(ls_body, ls_continue, 1.0)
+        alpha = jax.lax.while_loop(ls_continue, ls_body, 1.0)
+
+        # print(f"{iteration=}, {alpha=}, {m(x)=}, {f(x)=}, {c(x)=}, {m_slope=}")
 
         new_x = x + alpha * dx
         new_s = s + np.minimum(alpha_s_max, alpha) * ds
