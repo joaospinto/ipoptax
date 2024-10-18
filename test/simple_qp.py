@@ -32,7 +32,7 @@ class Test(parameterized.TestCase):
             ws_z = np.ones(4)
 
             outputs = solve(f=f, c=c, g=g, ws_x=ws_x, ws_s=ws_s, ws_y=ws_y,
-                            ws_z=ws_z)
+                            ws_z=ws_z, max_iterations=10)
             converged = outputs["converged"]
             iterations = outputs["iteration"]
             print(f"{converged=}, {iterations=}")

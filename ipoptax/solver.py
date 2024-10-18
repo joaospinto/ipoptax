@@ -59,8 +59,8 @@ def solve(
         x, s, y, z = split_vars(xsyz)
         return (
             f(x)
-            - np.dot(y, c(x))
-            - np.dot(z, g(x) + s)
+            + np.dot(y, c(x))
+            + np.dot(z, g(x) + s)
             - gamma * np.dot(y, y)
             - mu * np.log(s).sum()
         )
@@ -79,7 +79,7 @@ def solve(
             return delta_update_factor * delta
         def should_continue(delta):
             return np.logical_not(is_positive_definite(M + delta * np.eye(dim)))
-        return jax.lax.while_loop(body, should_continue, min_delta)
+        return jax.lax.while_loop(should_continue, body, min_delta)
 
     def get_rho(x, s, dx):
         # D(merit_function; dx) = D(f; dx) - rho * || (c(x), g(x) + s) ||
@@ -138,7 +138,10 @@ def solve(
             return alpha * line_search_factor
 
         def ls_continue(alpha):
-            return m(x + alpha * dx) - m(x) <= armijo_factor * m_slope * alpha
+            # TODO(joao): the line search has to be done in terms of both x and s, at least.
+            # TODO(joao): remove this line.
+            return False
+            return m(x + alpha * dx) - m(x) > armijo_factor * m_slope * alpha
 
         alpha = jax.lax.while_loop(ls_continue, ls_body, 1.0)
 
