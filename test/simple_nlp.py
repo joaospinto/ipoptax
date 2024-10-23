@@ -10,29 +10,24 @@ class Test(parameterized.TestCase):
     def setUp(self):
         super(Test, self).setUp()
 
-    def testSimpleQP(self):
+    def testSimpleNLP(self):
         with jax.disable_jit():
-            # Simple test from the OSQP repo.
-            P = np.array([[4.0, 1.0], [1.0, 2.0]])
-            q = np.ones(2)
 
             def f(x):
-                return 0.5 * x.T @ P @ x + q.T @ x
+                return x[1] * (5.0 + x[0])
 
             def c(x):
-                return np.array([[1.0, 1.0]]) @ x - np.array([1.0])
+                return jax.numpy.array([])
 
             def g(x):
-                return np.array(
-                    [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]
-                ) @ x - np.array([0.7, 0.0, 0.7, 0.0])
+                return jax.numpy.array(
+                    [5.0 - x[0] * x[1], x[0] * x[0] + x[1] * x[1] - 20.0]
+                )
 
-            n = P.shape[0]
-
-            ws_x = np.zeros(n)
-            ws_s = np.ones(4)
-            ws_y = np.zeros(1)
-            ws_z = np.ones(4)
+            ws_x = np.zeros(2)
+            ws_s = np.ones(2)
+            ws_y = np.zeros(0)
+            ws_z = np.ones(2)
 
             outputs = solve(
                 f=f,
