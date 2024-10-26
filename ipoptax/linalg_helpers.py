@@ -78,6 +78,8 @@ def project_psd_cone(Q, *, delta=0.0, use_lapack=True, iterate=True):
 def ldlt(Q):
     """Computes the L D L^T decomposition of Q."""
     n, _ = Q.shape
+
+    # TODO(joao): implement a version that is not recursive; recursion screws up JIT.
     if n == 1:
         return np.ones_like(Q), Q.reshape([1])
     else:

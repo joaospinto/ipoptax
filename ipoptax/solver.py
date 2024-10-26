@@ -4,7 +4,7 @@ import jax
 
 from functools import partial
 
-from .linalg_helpers import project_psd_cone
+from .linalg_helpers import project_psd_cone, solve_ldlt
 
 
 @partial(jax.jit, static_argnames=("f", "c", "g", "print_logs"))
@@ -41,7 +41,7 @@ def solve(
     # assert ws_s.min() > 0.0, "ws_s must contain only positive entries."
     # assert ws_z.min() > 0.0, "ws_z must contain only positive entries."
 
-    def split_vars(xsyz):
+    def split_xsyz_vars(xsyz):
         x_dim = ws_x.shape[0]
         s_dim = ws_s.shape[0]
         z_dim = ws_z.shape[0]
@@ -54,16 +54,29 @@ def solve(
         z = xsyz[-z_dim:]
         return x, s, y, z
 
-    def combine_vars(*, x, s, y, z):
+    def split_xyz_vars(xyz):
+        x_dim = ws_x.shape[0]
+        z_dim = ws_z.shape[0]
+
+        x = xyz[:x_dim]
+        y = xyz[x_dim:-z_dim]
+        z = xyz[-z_dim:]
+        return x, y, z
+
+    def split_xy_vars(xy):
+        x_dim = ws_x.shape[0]
+
+        x = xy[:x_dim]
+        y = xy[x_dim:]
+        return x, y
+
+    def combine_xsyz_vars(*, x, s, y, z):
         return np.concatenate([x, s, y, z])
 
     def barrier_augmented_lagrangian(xsyz, *, mu):
-        x, s, y, z = split_vars(xsyz)
+        x, s, y, z = split_xsyz_vars(xsyz)
         return (
-            f(x)
-            + np.dot(y, c(x))
-            + np.dot(z, g(x) + s)
-            - mu * np.log(s).sum()
+            f(x) + np.dot(y, c(x)) + np.dot(z, g(x) + s) - mu * np.log(s).sum()
         )
 
     def adaptive_mu(*, s, z, iteration):
@@ -83,9 +96,7 @@ def solve(
         return np.minimum((f_slope + k) / d, 1e9)
 
     def merit_function(*, x, s, rho):
-        return f(x) + rho * np.linalg.norm(
-            np.concatenate([c(x), g(x) + s])
-        )
+        return f(x) + rho * np.linalg.norm(np.concatenate([c(x), g(x) + s]))
 
     def merit_function_slope(*, x, s, dx, rho):
         return jax.grad(f)(x).dot(dx) - rho * np.linalg.norm(
@@ -97,7 +108,7 @@ def solve(
         s_dim = s.shape[0]
         y_dim = y.shape[0]
         z_dim = z.shape[0]
-        xsyz = combine_vars(x=x, s=s, y=y, z=z)
+        xsyz = combine_xsyz_vars(x=x, s=s, y=y, z=z)
         al = partial(barrier_augmented_lagrangian, mu=mu)
         lhs = jax.hessian(al)(xsyz)
         rhs = -jax.grad(al)(xsyz)
@@ -108,10 +119,12 @@ def solve(
             -gamma * np.eye(z_dim),
         )
 
-        lhs = lhs.at[:x_dim, :x_dim].set(project_psd_cone(lhs[:x_dim, :x_dim], delta=min_delta))
+        lhs = lhs.at[:x_dim, :x_dim].set(
+            project_psd_cone(lhs[:x_dim, :x_dim], delta=min_delta)
+        )
         dxsyz = np.linalg.solve(lhs, rhs)
         error = np.linalg.norm(lhs @ dxsyz - rhs)
-        return dxsyz, rhs, error
+        return dxsyz, error
 
     def compute_search_direction_stable_direct_method(*, x, s, y, z, mu):
         x_dim = x.shape[0]
@@ -158,8 +171,144 @@ def solve(
 
         dxsyz = np.linalg.solve(lhs, rhs)
         error = np.linalg.norm(lhs @ dxsyz - rhs)
-        return dxsyz, rhs, error
+        return dxsyz, error
 
+    def compute_search_direction_symmetric_direct_method_4x4(*, x, s, y, z, mu):
+        x_dim = x.shape[0]
+        s_dim = s.shape[0]
+        y_dim = y.shape[0]
+        z_dim = z.shape[0]
+
+        def al_x(xx):
+            return barrier_augmented_lagrangian(
+                np.concatenate([xx, s, y, z]), mu=mu
+            )
+
+        D1L = jax.grad(al_x)(x)
+        D2L = project_psd_cone(jax.hessian(al_x)(x), delta=min_delta)
+        C = jax.jacfwd(c)(x)
+        G = jax.jacfwd(g)(x)
+        lhs = np.block(
+            [
+                [D2L, np.zeros([x_dim, s_dim]), C.T, G.T],
+                [
+                    np.zeros([s_dim, x_dim]),
+                    np.diag(z / s),
+                    np.zeros([s_dim, y_dim]),
+                    np.eye(s_dim),
+                ],
+                [
+                    C,
+                    np.zeros([y_dim, s_dim]),
+                    -gamma * np.eye(y_dim),
+                    np.zeros([y_dim, z_dim]),
+                ],
+                [
+                    G,
+                    np.eye(z_dim),
+                    np.zeros([z_dim, y_dim]),
+                    -gamma * np.eye(z_dim),
+                ],
+            ]
+        )
+
+        rhs = -np.concatenate([D1L, z - mu / s, c(x), g(x) + s])
+
+        dxsyz = np.linalg.solve(lhs, rhs)
+
+        error = np.linalg.norm(lhs @ dxsyz - rhs)
+        return dxsyz, error
+
+    def compute_search_direction_symmetric_indirect_method_3x3(
+        *, x, s, y, z, mu
+    ):
+        x_dim = x.shape[0]
+        y_dim = y.shape[0]
+        z_dim = z.shape[0]
+
+        def al_x(xx):
+            return barrier_augmented_lagrangian(
+                np.concatenate([xx, s, y, z]), mu=mu
+            )
+
+        D1L = jax.grad(al_x)(x)
+        D2L = project_psd_cone(jax.hessian(al_x)(x), delta=min_delta)
+        C = jax.jacfwd(c)(x)
+        G = jax.jacfwd(g)(x)
+        sigma_inv = np.diag(s / z)
+        lhs = np.block(
+            [
+                [D2L, C.T, G.T],
+                [
+                    C,
+                    -gamma * np.eye(y_dim),
+                    np.zeros([y_dim, z_dim]),
+                ],
+                [
+                    G,
+                    np.zeros([z_dim, y_dim]),
+                    -sigma_inv - gamma * np.eye(z_dim),
+                ],
+            ]
+        )
+
+        rhs = -np.concatenate([D1L, c(x), g(x) + (mu / z)])
+
+        dxyz = np.linalg.solve(lhs, rhs)
+
+        dx, dy, dz = split_xyz_vars(dxyz)
+
+        ds = -(g(x) + s) + gamma * dz - G @ dx
+
+        dxsyz = combine_xsyz_vars(x=dx, s=ds, y=dy, z=dz)
+        error = np.linalg.norm(lhs @ dxyz - rhs)
+        return dxsyz, error
+
+    def compute_search_direction_symmetric_indirect_method_2x2(
+        *, x, s, y, z, mu
+    ):
+        x_dim = x.shape[0]
+        y_dim = y.shape[0]
+        z_dim = z.shape[0]
+
+        def al_x(xx):
+            return barrier_augmented_lagrangian(
+                np.concatenate([xx, s, y, z]), mu=mu
+            )
+
+        D1L = jax.grad(al_x)(x)
+        D2L = project_psd_cone(jax.hessian(al_x)(x), delta=min_delta)
+        C = jax.jacfwd(c)(x)
+        G = jax.jacfwd(g)(x)
+        sigma = np.diag(z / (s + gamma * z))
+        lhs = np.block(
+            [
+                [D2L + G.T @ sigma @ G, C.T],
+                [
+                    C,
+                    # TODO(joao): separate the two gammas? in our case, gamma_y = 0 is OK but we need gamma_z != 0.
+                    # np.zeros([y_dim, y_dim]),
+                    -gamma * np.eye(y_dim),
+                ],
+            ]
+        )
+
+        rhs = -np.concatenate([D1L + G.T @ sigma @ (g(x) + (mu / z)), c(x)])
+
+        dxy = np.linalg.solve(lhs, rhs)
+
+        dx, dy = split_xy_vars(dxy)
+
+        dz = sigma @ (g(x) + G @ dx + (mu / z))
+
+        ds = -(g(x) + s) + gamma * dz - G @ dx
+
+        dxsyz = combine_xsyz_vars(x=dx, s=ds, y=dy, z=dz)
+        error = np.linalg.norm(lhs @ dxy - rhs)
+        return dxsyz, error
+
+    # TODO(joao): try this after removing recursion from LDLT.
+    # dxsyz = solve_ldlt(lhs, rhs)
 
     def optimization_loop(inputs):
         x = inputs["x"]
@@ -173,11 +322,13 @@ def solve(
         x_dim = x.shape[0]
         s_dim = s.shape[0]
 
-        dxsyz, rhs, lin_sys_error = compute_search_direction_stable_direct_method(
-            x=x, s=s, y=y, z=z, mu=mu
+        dxsyz, lin_sys_error = (
+            compute_search_direction_symmetric_indirect_method_2x2(
+                x=x, s=s, y=y, z=z, mu=mu
+            )
         )
 
-        dx, ds, dy, dz = split_vars(dxsyz)
+        dx, ds, dy, dz = split_xsyz_vars(dxsyz)
 
         tau = np.maximum(tau_min, np.where(mu > 0.0, 1.0 - mu, 0.0))
 
@@ -236,14 +387,16 @@ def solve(
         new_y = y + dual_alpha * dy
         new_z = z + dual_alpha * dz
 
-        # Note that the derivatives with respect to s should be excluded,
-        # because of the log-barrier terms.
-        converged = (
-            np.maximum(
-                np.abs(rhs[:x_dim]).max(), np.abs(rhs[x_dim + s_dim :]).max()
+        def al_x(xx):
+            return barrier_augmented_lagrangian(
+                np.concatenate([xx, new_s, new_y, new_z]), mu=mu
             )
-            < max_kkt_violation
+
+        residual = np.concatenate(
+            [jax.grad(al_x)(new_x), c(new_x), g(new_x) + new_s]
         )
+
+        converged = residual.max() < max_kkt_violation
         should_continue = np.logical_and(
             np.logical_not(converged), iteration < max_iterations
         )
