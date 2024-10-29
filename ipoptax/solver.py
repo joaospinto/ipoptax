@@ -110,20 +110,30 @@ def solve(
         sigma = 0.1 * np.minimum(0.5 * (1.0 - zeta) / zeta, 2) ** 3
         return sigma * dot / m
 
-    def get_rho(*, x, s, dx):
-        # D(merit_function; dx) = D(f; dx) - rho * || (c(x), g(x) + s) ||
-        # rho > (D(f; dx) + k) / || (c(x), g(x) + s) || iff D(merit_function; dx) < -k.
+    def get_rho(*, x, s, dx, ds, mu):
+        # D(merit_function; dx, ds) = D(f; dx) - mu (ds / s) - rho * ||c(x)|| - rho * ||g(x) + s ||
+        # rho > (D(f; dx) + k) / (|| (c(x) || + || g(x) + s) || iff D(merit_function; dx) < -k.
         f_slope = jax.grad(f)(x).dot(dx)
-        d = np.linalg.norm(np.concatenate([c(x), g(x) + s]))
-        k = np.maximum(d, 2.0 * np.abs(f_slope))
-        return np.minimum((f_slope + k) / d, 1e9)
+        barrier_slope = -(mu / s).dot(ds)
+        obj_slope = f_slope + barrier_slope
+        d = np.linalg.norm(c(x)) + np.linalg.norm(g(x) + s)
+        k = np.maximum(d, 2.0 * np.abs(obj_slope))
+        return np.minimum((obj_slope + k) / d, 1e9)
 
-    def merit_function(*, x, s, rho):
-        return f(x) + rho * np.linalg.norm(np.concatenate([c(x), g(x) + s]))
+    def merit_function(*, x, s, mu, rho):
+        return (
+            f(x)
+            - mu * np.log(s).sum()
+            + rho * np.linalg.norm(c(x))
+            + rho * np.linalg.norm(g(x) + s)
+        )
 
-    def merit_function_slope(*, x, s, dx, rho):
-        return jax.grad(f)(x).dot(dx) - rho * np.linalg.norm(
-            np.concatenate([c(x), g(x) + s])
+    def merit_function_slope(*, x, s, dx, ds, mu, rho):
+        return (
+            jax.grad(f)(x).dot(dx)
+            - (mu / s).dot(ds)
+            - rho * np.linalg.norm(c(x))
+            - rho * np.linalg.norm(g(x) + s)
         )
 
     def compute_search_direction_autodiff(*, x, s, y, z, mu):
@@ -245,7 +255,6 @@ def solve(
     def compute_search_direction_symmetric_indirect_method_3x3(
         *, x, s, y, z, mu
     ):
-        x_dim = x.shape[0]
         y_dim = y.shape[0]
         z_dim = z.shape[0]
 
@@ -290,9 +299,7 @@ def solve(
     def compute_search_direction_symmetric_indirect_method_2x2(
         *, x, s, y, z, mu
     ):
-        x_dim = x.shape[0]
         y_dim = y.shape[0]
-        z_dim = z.shape[0]
 
         def al_x(xx):
             return barrier_augmented_lagrangian(
@@ -360,9 +367,6 @@ def solve(
 
         mu = np.maximum(adaptive_mu(s=s, z=z, iteration=iteration), mu_min)
 
-        x_dim = x.shape[0]
-        s_dim = s.shape[0]
-
         dxsyz, lin_sys_error = compute_search_direction_dispatcher(
             x=x, s=s, y=y, z=z, mu=mu
         )
@@ -379,32 +383,32 @@ def solve(
         mod_dz = np.minimum(dz, np.full_like(dz, -1e-12))
         alpha_z_max = np.minimum((-tau * z / mod_dz).min(), 1.0)
 
-        rho = get_rho(x=x, s=s, dx=dx)
-        m = partial(merit_function, s=s, rho=rho)
-        m_slope = merit_function_slope(x=x, s=s, dx=dx, rho=rho)
+        rho = get_rho(x=x, s=s, dx=dx, ds=ds, mu=mu)
+        m = partial(merit_function, mu=mu, rho=rho)
+        m_slope = merit_function_slope(x=x, s=s, dx=dx, ds=ds, mu=mu, rho=rho)
 
         def ls_body(alpha):
             return alpha * line_search_factor
 
         def ls_continue(alpha):
-            # TODO(joao): the line search has to be done in terms of both x and s, at least.
-            #             until the line search code is fixed, it's turned off.
-            return False
             return np.logical_and(
-                m(x + alpha * dx) - m(x) >= armijo_factor * m_slope * alpha,
+                m(
+                    x=(x + alpha * dx),
+                    s=(s + np.minimum(alpha, alpha_s_max) * ds),
+                )
+                - m(x=x, s=s)
+                >= armijo_factor * m_slope * alpha,
                 alpha > line_search_min_step_size,
             )
 
-        # TODO(joao): this seems non-standard; investigate why it's needed.
-        alpha = jax.lax.while_loop(ls_continue, ls_body, 1.0)
-        # alpha = jax.lax.while_loop(ls_continue, ls_body, alpha_s_max)
+        alpha = jax.lax.while_loop(ls_continue, ls_body, alpha_s_max)
 
         if print_logs:
             jax.debug.print(
                 "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",
                 iteration,
                 alpha,
-                m(x=x),
+                m(x=x, s=s),
                 f(x),
                 np.linalg.norm(c(x)),
                 np.linalg.norm(g(x) + s),
@@ -422,7 +426,7 @@ def solve(
         dual_alpha = alpha_z_max
 
         new_x = x + alpha * dx
-        new_s = s + np.minimum(alpha, alpha_s_max) * ds
+        new_s = s + alpha * ds
         new_y = y + dual_alpha * dy
         new_z = z + dual_alpha * dz
 
