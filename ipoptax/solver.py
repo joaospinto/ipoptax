@@ -2,12 +2,32 @@ from jax import numpy as np
 
 import jax
 
+from enum import Enum
+
 from functools import partial
 
-from .linalg_helpers import project_psd_cone, solve_ldlt
+from .linalg_helpers import project_psd_cone
 
 
-@partial(jax.jit, static_argnames=("f", "c", "g", "print_logs"))
+class LinearSystemFormulation(Enum):
+    AUTODIFF = 0
+    STABLE_DIRECT_4x4 = 1
+    SYMMETRIC_DIRECT_4x4 = 2
+    SYMMETRIC_INDIRECT_3x3 = 3
+    SYMMETRIC_INDIRECT_2x2 = 4
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "f",
+        "c",
+        "g",
+        "print_logs",
+        "lin_sys_formulation",
+        "lin_sys_solver",
+    ),
+)
 def solve(
     *,
     f,
@@ -19,10 +39,13 @@ def solve(
     ws_z,
     max_iterations=100,
     max_kkt_violation=1e-6,
+    lin_sys_formulation=LinearSystemFormulation.SYMMETRIC_INDIRECT_2x2,
+    lin_sys_solver=np.linalg.solve,
     tau_min=0.995,
     mu_min=1e-12,
     min_delta=1e-9,
-    gamma=1e-6,
+    gamma_y=1e-6,
+    gamma_z=1e-6,
     armijo_factor=1e-4,
     line_search_factor=0.5,
     line_search_min_step_size=1e-6,
@@ -33,7 +56,7 @@ def solve(
         min_x f(x) s.t. (c(x) = 0 and g(x) + s = 0 and s >= 0)
 
     min_delta determines the minimum regularization on the objective Hessian.
-    gamma regularizes the constraints to ensure the Newton-KKT system is non-singular.
+    gamma_y, gamma_z regularize the constraints to ensure the Newton-KKT system is non-singular.
     tau_min is a parameter used in the fraction-to-the-boundary rule.
     line_search_factor determines how much to backtrack at each line search iteration.
     """
@@ -115,14 +138,14 @@ def solve(
         lhs += jax.scipy.linalg.block_diag(
             np.zeros([x_dim, x_dim]),
             np.zeros([s_dim, s_dim]),
-            -gamma * np.eye(y_dim),
-            -gamma * np.eye(z_dim),
+            -gamma_y * np.eye(y_dim),
+            -gamma_z * np.eye(z_dim),
         )
 
         lhs = lhs.at[:x_dim, :x_dim].set(
             project_psd_cone(lhs[:x_dim, :x_dim], delta=min_delta)
         )
-        dxsyz = np.linalg.solve(lhs, rhs)
+        dxsyz = lin_sys_solver(lhs, rhs)
         error = np.linalg.norm(lhs @ dxsyz - rhs)
         return dxsyz, error
 
@@ -153,14 +176,14 @@ def solve(
                 [
                     C,
                     np.zeros([y_dim, s_dim]),
-                    -gamma * np.eye(y_dim),
+                    -gamma_y * np.eye(y_dim),
                     np.zeros([y_dim, z_dim]),
                 ],
                 [
                     G,
                     np.eye(z_dim),
                     np.zeros([z_dim, y_dim]),
-                    -gamma * np.eye(z_dim),
+                    -gamma_z * np.eye(z_dim),
                 ],
             ]
         )
@@ -169,7 +192,7 @@ def solve(
             [D1L, s * z - mu * np.ones_like(s), c(x), g(x) + s]
         )
 
-        dxsyz = np.linalg.solve(lhs, rhs)
+        dxsyz = lin_sys_solver(lhs, rhs)
         error = np.linalg.norm(lhs @ dxsyz - rhs)
         return dxsyz, error
 
@@ -200,21 +223,21 @@ def solve(
                 [
                     C,
                     np.zeros([y_dim, s_dim]),
-                    -gamma * np.eye(y_dim),
+                    -gamma_y * np.eye(y_dim),
                     np.zeros([y_dim, z_dim]),
                 ],
                 [
                     G,
                     np.eye(z_dim),
                     np.zeros([z_dim, y_dim]),
-                    -gamma * np.eye(z_dim),
+                    -gamma_z * np.eye(z_dim),
                 ],
             ]
         )
 
         rhs = -np.concatenate([D1L, z - mu / s, c(x), g(x) + s])
 
-        dxsyz = np.linalg.solve(lhs, rhs)
+        dxsyz = lin_sys_solver(lhs, rhs)
 
         error = np.linalg.norm(lhs @ dxsyz - rhs)
         return dxsyz, error
@@ -241,24 +264,24 @@ def solve(
                 [D2L, C.T, G.T],
                 [
                     C,
-                    -gamma * np.eye(y_dim),
+                    -gamma_y * np.eye(y_dim),
                     np.zeros([y_dim, z_dim]),
                 ],
                 [
                     G,
                     np.zeros([z_dim, y_dim]),
-                    -sigma_inv - gamma * np.eye(z_dim),
+                    -sigma_inv - gamma_z * np.eye(z_dim),
                 ],
             ]
         )
 
         rhs = -np.concatenate([D1L, c(x), g(x) + (mu / z)])
 
-        dxyz = np.linalg.solve(lhs, rhs)
+        dxyz = lin_sys_solver(lhs, rhs)
 
         dx, dy, dz = split_xyz_vars(dxyz)
 
-        ds = -(g(x) + s) + gamma * dz - G @ dx
+        ds = -(g(x) + s) + gamma_z * dz - G @ dx
 
         dxsyz = combine_xsyz_vars(x=dx, s=ds, y=dy, z=dz)
         error = np.linalg.norm(lhs @ dxyz - rhs)
@@ -280,35 +303,53 @@ def solve(
         D2L = project_psd_cone(jax.hessian(al_x)(x), delta=min_delta)
         C = jax.jacfwd(c)(x)
         G = jax.jacfwd(g)(x)
-        sigma = np.diag(z / (s + gamma * z))
+        sigma = np.diag(z / (s + gamma_z * z))
         lhs = np.block(
             [
                 [D2L + G.T @ sigma @ G, C.T],
                 [
                     C,
-                    # TODO(joao): separate the two gammas? in our case, gamma_y = 0 is OK but we need gamma_z != 0.
-                    # np.zeros([y_dim, y_dim]),
-                    -gamma * np.eye(y_dim),
+                    -gamma_y * np.eye(y_dim),
                 ],
             ]
         )
 
         rhs = -np.concatenate([D1L + G.T @ sigma @ (g(x) + (mu / z)), c(x)])
 
-        dxy = np.linalg.solve(lhs, rhs)
+        dxy = lin_sys_solver(lhs, rhs)
 
         dx, dy = split_xy_vars(dxy)
 
         dz = sigma @ (g(x) + G @ dx + (mu / z))
 
-        ds = -(g(x) + s) + gamma * dz - G @ dx
+        ds = -(g(x) + s) + gamma_z * dz - G @ dx
 
         dxsyz = combine_xsyz_vars(x=dx, s=ds, y=dy, z=dz)
         error = np.linalg.norm(lhs @ dxy - rhs)
         return dxsyz, error
 
-    # TODO(joao): try this after removing recursion from LDLT.
-    # dxsyz = solve_ldlt(lhs, rhs)
+    def compute_search_direction_dispatcher(*, x, s, y, z, mu):
+        match lin_sys_formulation:
+            case LinearSystemFormulation.AUTODIFF:
+                return compute_search_direction_autodiff(
+                    x=x, s=s, y=y, z=z, mu=mu
+                )
+            case LinearSystemFormulation.STABLE_DIRECT_4x4:
+                return compute_search_direction_stable_direct_method(
+                    x=x, s=s, y=y, z=z, mu=mu
+                )
+            case LinearSystemFormulation.SYMMETRIC_DIRECT_4x4:
+                return compute_search_direction_symmetric_direct_method_4x4(
+                    x=x, s=s, y=y, z=z, mu=mu
+                )
+            case LinearSystemFormulation.SYMMETRIC_INDIRECT_3x3:
+                return compute_search_direction_symmetric_indirect_method_3x3(
+                    x=x, s=s, y=y, z=z, mu=mu
+                )
+            case LinearSystemFormulation.SYMMETRIC_INDIRECT_2x2:
+                return compute_search_direction_symmetric_indirect_method_2x2(
+                    x=x, s=s, y=y, z=z, mu=mu
+                )
 
     def optimization_loop(inputs):
         x = inputs["x"]
@@ -322,10 +363,8 @@ def solve(
         x_dim = x.shape[0]
         s_dim = s.shape[0]
 
-        dxsyz, lin_sys_error = (
-            compute_search_direction_symmetric_indirect_method_2x2(
-                x=x, s=s, y=y, z=z, mu=mu
-            )
+        dxsyz, lin_sys_error = compute_search_direction_dispatcher(
+            x=x, s=s, y=y, z=z, mu=mu
         )
 
         dx, ds, dy, dz = split_xsyz_vars(dxsyz)

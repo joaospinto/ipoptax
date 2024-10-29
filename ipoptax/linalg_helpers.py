@@ -79,44 +79,35 @@ def ldlt(Q):
     """Computes the L D L^T decomposition of Q."""
     n, _ = Q.shape
 
-    # TODO(joao): implement a version that is not recursive; recursion screws up JIT.
-    if n == 1:
-        return np.ones_like(Q), Q.reshape([1])
-    else:
-        L_prev, D_diag_prev = ldlt(Q[: n - 1, : n - 1])
+    def outer_body(i, outer_carry):
+        def inner_body(j, inner_carry):
+            L, D_diag = inner_carry
 
-        i = n - 1
+            # Note: the terms with k >=i are 0.
+            terms = vmap(lambda k: L[i, k] * L[j, k] * D_diag[k])(np.arange(n))
 
-        def f(carry, elem):
-            partial_new_L = carry
-            j = elem
+            L = L.at[i, j].set((1.0 / D_diag[j]) * (Q[i, j] - np.sum(terms)))
 
-            terms = vmap(
-                lambda k: partial_new_L[k] * L_prev[j, k] * D_diag_prev[k]
-            )(np.arange(n - 1))
+            return L, D_diag
 
-            new_L_elem = (1.0 / D_diag_prev[j]) * (Q[i, j] - np.sum(terms))
-
-            new_output = new_L_elem
-            new_carry = vmap(
-                lambda k: np.where(np.equal(k, j), new_L_elem, partial_new_L[k])
-            )(np.arange(n - 1))
-
-            return new_carry, new_output
-
-        new_L_row = lax.scan(f, np.zeros(n - 1), np.arange(n - 1), n - 1)[1]
-
-        L = np.block(
-            [[L_prev, np.zeros([n - 1, 1])], [new_L_row, np.array([1.0])]]
+        # Update L.
+        L, D_diag = lax.fori_loop(
+            lower=0, upper=i, body_fun=inner_body, init_val=outer_carry
         )
 
-        terms = vmap(lambda j: L[i, j] * L[i, j] * D_diag_prev[j])(np.arange(i))
-
-        new_D_elem = Q[i, i] - np.sum(terms)
-
-        D_diag = np.append(D_diag_prev, new_D_elem)
+        # Update D_diag.
+        # Note: the terms with k >=i are 0.
+        terms = vmap(lambda k: L[i, k] * L[i, k] * D_diag[k])(np.arange(n))
+        D_diag = D_diag.at[i].set(Q[i, i] - np.sum(terms))
 
         return L, D_diag
+
+    return lax.fori_loop(
+        lower=0,
+        upper=n,
+        body_fun=outer_body,
+        init_val=(np.eye(n), np.zeros(n)),
+    )
 
 
 @jit
