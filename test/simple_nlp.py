@@ -11,46 +11,47 @@ class Test(parameterized.TestCase):
         super(Test, self).setUp()
 
     def testSimpleNLP(self):
-        with jax.disable_jit():
+        @jax.jit
+        def f(x):
+            return x[1] * (5.0 + x[0])
 
-            def f(x):
-                return x[1] * (5.0 + x[0])
+        @jax.jit
+        def c(_):
+            return jax.numpy.array([])
 
-            def c(x):
-                return jax.numpy.array([])
-
-            def g(x):
-                return jax.numpy.array(
-                    [5.0 - x[0] * x[1], x[0] * x[0] + x[1] * x[1] - 20.0]
-                )
-
-            ws_x = np.zeros(2)
-            ws_s = np.ones(2)
-            ws_y = np.zeros(0)
-            ws_z = np.ones(2)
-
-            outputs = solve(
-                f=f,
-                c=c,
-                g=g,
-                ws_x=ws_x,
-                ws_s=ws_s,
-                ws_y=ws_y,
-                ws_z=ws_z,
-                max_iterations=20,
-                max_kkt_violation=1e-12,
+        @jax.jit
+        def g(x):
+            return jax.numpy.array(
+                [5.0 - x[0] * x[1], x[0] * x[0] + x[1] * x[1] - 20.0]
             )
-            converged = outputs["converged"]
-            iterations = outputs["iteration"]
-            print(f"{converged=}, {iterations=}")
 
-            print(f"The optimal value is {f(np.array([0.3, 0.7]))}.")
+        ws_x = np.zeros(2)
+        ws_s = np.ones(2)
+        ws_y = np.zeros(0)
+        ws_z = np.ones(2)
 
-            self.assertTrue(converged)
+        outputs = solve(
+            f=f,
+            c=c,
+            g=g,
+            ws_x=ws_x,
+            ws_s=ws_s,
+            ws_y=ws_y,
+            ws_z=ws_z,
+            max_iterations=20,
+            max_kkt_violation=1e-12,
+        )
+        converged = outputs["converged"]
+        iterations = outputs["iteration"]
+        print(f"{converged=}, {iterations=}")
 
-            self.assertTrue(
-                np.linalg.norm(outputs["x"] - np.array([0.3, 0.7]) < 1e-6)
-            )
+        print(f"The optimal value is {f(np.array([0.3, 0.7]))}.")
+
+        self.assertTrue(converged)
+
+        self.assertTrue(
+            np.linalg.norm(outputs["x"] - np.array([0.3, 0.7]) < 1e-6)
+        )
 
 
 if __name__ == "__main__":

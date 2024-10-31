@@ -23,9 +23,9 @@ class LinearSystemFormulation(Enum):
         "f",
         "c",
         "g",
-        "print_logs",
         "lin_sys_formulation",
         "lin_sys_solver",
+        "print_logs",
     ),
 )
 def solve(
@@ -469,22 +469,23 @@ def solve(
 
     if print_logs:
         jax.debug.print(
-            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}",
-            "iteration",
-            "alpha",
-            "merit",
-            "f",
-            "|c|",
-            "|g+s|",
-            "m_slope",
-            "alpha_s_m",
-            "alpha_z_m",
-            "|dx|",
-            "|ds|",
-            "|dy|",
-            "|dz|",
-            "mu",
-            "linsys_res",
+            "{:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10} {:^10}".format(
+                "iteration",
+                "alpha",
+                "merit",
+                "f",
+                "|c|",
+                "|g+s|",
+                "m_slope",
+                "alpha_s_m",
+                "alpha_z_m",
+                "|dx|",
+                "|ds|",
+                "|dy|",
+                "|dz|",
+                "mu",
+                "linsys_res",
+            )
         )
 
     outputs = jax.lax.while_loop(

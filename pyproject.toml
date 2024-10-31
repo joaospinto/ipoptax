@@ -5,8 +5,9 @@ requires-python = ">= 3.12"
 dependencies = [
   "absl-py",
   "black",
-  "jax[cpu]; platform_system != \"Linux\"",
-  "jax[cuda12]; platform_system == \"Linux\"",
+  # Debug printing won't work with JIT in some older versions of JAX.
+  "jax[cpu] >= 0.4.35; platform_system != \"Linux\"",
+  "jax[cuda12] >= 0.4.35; platform_system == \"Linux\"",
   "numpy",
 ]
 authors = [
