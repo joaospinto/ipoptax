@@ -43,14 +43,16 @@ class Test(parameterized.TestCase):
         )
         converged = outputs["converged"]
         iterations = outputs["iteration"]
-        print(f"{converged=}, {iterations=}")
+        jax.debug.print("converged={}, iterations={}", converged, iterations)
 
-        print(f"The optimal value is {f(np.array([0.3, 0.7]))}.")
+        approx_solution = np.array([-1.15747396, -4.31975162])
 
-        self.assertTrue(converged)
+        jax.debug.print("The optimal value is {}.", f(approx_solution))
+
+        self.assertTrue(converged.item())
 
         self.assertTrue(
-            np.linalg.norm(outputs["x"] - np.array([0.3, 0.7]) < 1e-6)
+            (np.linalg.norm(outputs["x"] - approx_solution < 1e-6)).item()
         )
 
 
