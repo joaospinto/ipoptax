@@ -403,15 +403,22 @@ def solve(
 
         alpha = jax.lax.while_loop(ls_continue, ls_body, alpha_s_max)
 
+        dual_alpha = alpha_z_max
+
+        new_x = x + alpha * dx
+        new_s = s + alpha * ds
+        new_y = y + dual_alpha * dy
+        new_z = z + dual_alpha * dz
+
         if print_logs:
             jax.debug.print(
                 "{:^+10} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g} {:^+10.4g}",
                 iteration,
                 alpha,
-                m(x=x, s=s),
-                f(x),
-                np.linalg.norm(c(x)),
-                np.linalg.norm(g(x) + s),
+                m(x=new_x, s=new_s),
+                f(new_x),
+                np.linalg.norm(c(new_x)),
+                np.linalg.norm(g(new_x) + new_s),
                 m_slope,
                 alpha_s_max,
                 alpha_z_max,
@@ -423,13 +430,6 @@ def solve(
                 lin_sys_error,
             )
 
-        dual_alpha = alpha_z_max
-
-        new_x = x + alpha * dx
-        new_s = s + alpha * ds
-        new_y = y + dual_alpha * dy
-        new_z = z + dual_alpha * dz
-
         def al_x(xx):
             return barrier_augmented_lagrangian(
                 np.concatenate([xx, new_s, new_y, new_z]), mu=mu
@@ -439,7 +439,7 @@ def solve(
             [jax.grad(al_x)(new_x), c(new_x), g(new_x) + new_s]
         )
 
-        converged = residual.max() < max_kkt_violation
+        converged = np.abs(residual).max() < max_kkt_violation
         should_continue = np.logical_and(
             np.logical_not(converged), iteration < max_iterations
         )
